@@ -82,6 +82,49 @@ def carregar_dados(dt_ini: date, dt_fim: date) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=900, show_spinner="Carregando contas a pagar...")
+def carregar_pagar(dt_ini: date, dt_fim: date) -> pd.DataFrame:
+    """Contas a pagar EM ABERTO (id_tipo=2, dt_quitacao IS NULL, saldo > 0)."""
+    cfg = st.secrets["postgres"]
+    conn_kwargs = dict(
+        host=cfg["host"], port=int(cfg["port"]), dbname=cfg["dbname"],
+        user=cfg["user"], password=cfg["password"],
+        sslmode=cfg.get("sslmode", "disable"), connect_timeout=30,
+    )
+    query = """
+    SELECT
+        t.dt_vencimento,
+        t.vl_titulo,
+        COALESCE(t.vl_pago, 0)                  AS vl_pago,
+        (t.vl_titulo - COALESCE(t.vl_pago, 0))  AS vl_saldo,
+        p.nm_pessoa                             AS favorecido,
+        fil.nm_pessoa                           AS filial
+    FROM titulo t
+    JOIN movimento m         ON m.cd_movimento = t.cd_movimento
+    LEFT JOIN pessoa p       ON p.cd_pessoa = t.cd_pessoa
+    LEFT JOIN pessoa fil     ON fil.cd_pessoa = m.cd_pessoa_filial
+    WHERE m.cd_pessoa_filial = ANY(%s)
+      AND t.id_tipo = 2
+      AND t.dt_quitacao IS NULL
+      AND (t.vl_titulo - COALESCE(t.vl_pago, 0)) > 0
+      AND t.dt_vencimento BETWEEN %s AND %s
+    ORDER BY t.dt_vencimento;
+    """
+    with psycopg2.connect(**conn_kwargs) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SET statement_timeout = '180s';")
+            cur.execute(query, (PIANETTO_CDS, dt_ini, dt_fim))
+            rows = cur.fetchall()
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["vl_titulo"] = df["vl_titulo"].astype(float)
+    df["vl_pago"]   = df["vl_pago"].astype(float)
+    df["vl_saldo"]  = df["vl_saldo"].astype(float)
+    df["dt_vencimento"] = pd.to_datetime(df["dt_vencimento"]).dt.date
+    return df
+
+
 # =================== HELPERS ===================
 def fmt_brl(v: float) -> str:
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -172,6 +215,11 @@ def main():
         st.warning("Filtros nao retornaram resultados.")
         return
 
+    # ===== Carrega Contas a Pagar (mesma janela, em aberto) =====
+    df_pag = carregar_pagar(dt_ini, dt_fim)
+    if not df_pag.empty:
+        df_pag = df_pag[df_pag["filial"].isin(sel_filiais)].copy()
+
     # ===== KPIs =====
     total_titulo = df["vl_titulo"].sum()
     total_pago   = df["vl_pago"].sum()
@@ -186,13 +234,36 @@ def main():
     s14 = df_aberto[df_aberto["dt_vencimento"] <= hoje + timedelta(days=14)]["vl_saldo"].sum()
     s21 = df_aberto[df_aberto["dt_vencimento"] <= hoje + timedelta(days=21)]["vl_saldo"].sum()
 
-    # Linha 1 - macro
+    # Totais AP
+    total_pagar       = df_pag["vl_saldo"].sum() if not df_pag.empty else 0.0
+    qtd_pagar         = len(df_pag) if not df_pag.empty else 0
+    saldo_liquido     = total_saldo - total_pagar
+    pagar_hoje = pagar_7 = pagar_14 = pagar_21 = 0.0
+    if not df_pag.empty:
+        pagar_hoje = df_pag[df_pag["dt_vencimento"] == hoje]["vl_saldo"].sum()
+        pagar_7  = df_pag[df_pag["dt_vencimento"] <= hoje + timedelta(days=7)]["vl_saldo"].sum()
+        pagar_14 = df_pag[df_pag["dt_vencimento"] <= hoje + timedelta(days=14)]["vl_saldo"].sum()
+        pagar_21 = df_pag[df_pag["dt_vencimento"] <= hoje + timedelta(days=21)]["vl_saldo"].sum()
+
+    # ===== KPIs Linha 1 - Fluxo de Caixa =====
+    st.markdown("##### 💰 Fluxo de Caixa do periodo (em aberto)")
+    cf1, cf2, cf3 = st.columns(3)
+    cf1.metric("Saldo a Receber", fmt_brl(total_saldo), f"{qtd_aberto} titulos",
+               delta_color="normal")
+    cf2.metric("Saldo a Pagar", fmt_brl(total_pagar), f"{qtd_pagar} titulos",
+               delta_color="inverse")
+    delta_label = "Positivo" if saldo_liquido >= 0 else "Negativo"
+    cf3.metric("Saldo Liquido (R − P)", fmt_brl(saldo_liquido), delta_label,
+               delta_color="normal" if saldo_liquido >= 0 else "inverse")
+
+    st.markdown("##### 📊 Detalhe Contas a Receber")
+    # Linha 2 - macro AR
     c1, c2, c3 = st.columns(3)
     c1.metric("Valor total dos titulos", fmt_brl(total_titulo), f"{qtd_tit} titulos")
     c2.metric("Ja recebido", fmt_brl(total_pago), f"{qtd_quit} quitados")
     c3.metric("Saldo a receber", fmt_brl(total_saldo), f"{qtd_aberto} em aberto")
 
-    # Linha 2 - prazo
+    # Linha 3 - prazo AR
     c4, c5, c6, c7 = st.columns(4)
     c4.metric("Vence hoje (aberto)", fmt_brl(venc_hoje))
     c5.metric("Proximos 7 dias", fmt_brl(s7))
@@ -202,9 +273,119 @@ def main():
     st.divider()
 
     # ===== Tabs =====
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(
-        ["📅 Por Dia", "👥 Por Cliente", "🔥 Dia × Cliente", "🏬 Por Filial", "📋 Detalhe"]
+    tab_cf, tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["💰 Fluxo de Caixa", "📅 Por Dia", "👥 Por Cliente",
+         "🔥 Dia × Cliente", "🏬 Por Filial", "📋 Detalhe"]
     )
+
+    # --- TAB CF: FLUXO DE CAIXA (Receber vs Pagar) ---
+    with tab_cf:
+        st.subheader("Receber × Pagar por dia (saldos em aberto)")
+
+        # AR aberto por dia
+        ar_dia = (df_aberto.groupby("dt_vencimento")["vl_saldo"].sum()
+                  .reset_index()
+                  .rename(columns={"vl_saldo": "receber"}))
+        # AP aberto por dia
+        if df_pag.empty:
+            ap_dia = pd.DataFrame(columns=["dt_vencimento", "pagar"])
+        else:
+            ap_dia = (df_pag.groupby("dt_vencimento")["vl_saldo"].sum()
+                      .reset_index()
+                      .rename(columns={"vl_saldo": "pagar"}))
+
+        full = pd.DataFrame({"dt_vencimento": pd.date_range(dt_ini, dt_fim, freq="D").date})
+        cf = (full.merge(ar_dia, on="dt_vencimento", how="left")
+                   .merge(ap_dia, on="dt_vencimento", how="left")
+                   .fillna(0))
+        cf["liquido"] = cf["receber"] - cf["pagar"]
+        cf["acumulado"] = cf["liquido"].cumsum()
+        cf["dia"] = cf["dt_vencimento"].map(lambda d: DIAS_SEM[d.weekday()])
+
+        # KPIs do periodo
+        tot_r = float(cf["receber"].sum())
+        tot_p = float(cf["pagar"].sum())
+        tot_l = tot_r - tot_p
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Total a Receber (periodo)", fmt_brl(tot_r))
+        k2.metric("Total a Pagar (periodo)", fmt_brl(tot_p))
+        k3.metric("Saldo Liquido", fmt_brl(tot_l),
+                  "Positivo" if tot_l >= 0 else "Negativo",
+                  delta_color="normal" if tot_l >= 0 else "inverse")
+
+        # Grafico: Receber (positivo, verde), Pagar (negativo, vermelho), linha acumulado
+        fig = go.Figure()
+        fig.add_bar(
+            x=cf["dt_vencimento"], y=cf["receber"],
+            name="A Receber", marker_color="#2E8B57",
+            text=cf["receber"].map(lambda v: fmt_brl(v) if v else ""),
+            textposition="outside",
+            hovertemplate="Receber: R$ %{y:,.2f}<extra></extra>",
+        )
+        fig.add_bar(
+            x=cf["dt_vencimento"], y=-cf["pagar"],
+            name="A Pagar", marker_color="#C0392B",
+            text=cf["pagar"].map(lambda v: f"-{fmt_brl(v)}" if v else ""),
+            textposition="outside",
+            hovertemplate="Pagar: R$ %{customdata:,.2f}<extra></extra>",
+            customdata=cf["pagar"],
+        )
+        fig.add_scatter(
+            x=cf["dt_vencimento"], y=cf["acumulado"],
+            name="Liquido acumulado", mode="lines+markers",
+            line=dict(color="#1F4E78", width=2.5),
+            yaxis="y2",
+            hovertemplate="Acumulado: R$ %{y:,.2f}<extra></extra>",
+        )
+        fig.add_hline(y=0, line_width=1, line_color="#666")
+        fig.add_vline(x=hoje, line_dash="dash", line_color="#FFC000",
+                      annotation_text="Hoje", annotation_position="top right")
+        fig.update_layout(
+            barmode="relative", height=520,
+            title="Fluxo de caixa diario (Receber positivo · Pagar negativo)",
+            xaxis=dict(tickformat="%d/%m"),
+            yaxis=dict(title="Valor diario (R$)", zeroline=True),
+            yaxis2=dict(title="Saldo acumulado (R$)", overlaying="y",
+                        side="right", showgrid=False),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=1, xanchor="right"),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("##### Tabela diaria")
+        tbl = cf.rename(columns={
+            "dt_vencimento": "Data", "dia": "Dia",
+            "receber": "A Receber", "pagar": "A Pagar",
+            "liquido": "Liquido", "acumulado": "Acumulado",
+        })[["Data", "Dia", "A Receber", "A Pagar", "Liquido", "Acumulado"]].copy()
+
+        # Estilizando a tabela para destacar liquido negativo
+        st.dataframe(
+            tbl,
+            use_container_width=True, hide_index=True,
+            column_config={
+                "Data": st.column_config.DateColumn(format="DD/MM/YYYY"),
+                "A Receber": st.column_config.NumberColumn(format="R$ %.2f"),
+                "A Pagar": st.column_config.NumberColumn(format="R$ %.2f"),
+                "Liquido": st.column_config.NumberColumn(format="R$ %.2f"),
+                "Acumulado": st.column_config.NumberColumn(format="R$ %.2f"),
+            },
+        )
+
+        st.download_button(
+            "⬇️ Baixar Excel - Fluxo de Caixa",
+            data=to_excel(tbl, "FluxoCaixa"),
+            file_name=f"pianetto_fluxo_caixa_{hoje.isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        # Dias criticos (liquido negativo)
+        criticos = cf[cf["liquido"] < 0]
+        if not criticos.empty:
+            st.warning(
+                f"⚠️ **{len(criticos)} dia(s)** com saldo liquido negativo no periodo. "
+                f"Maior deficit: **{fmt_brl(criticos['liquido'].min())}** em "
+                f"{criticos.loc[criticos['liquido'].idxmin(), 'dt_vencimento'].strftime('%d/%m/%Y')}."
+            )
 
     # --- TAB 1: POR DIA ---
     with tab1:
@@ -432,8 +613,9 @@ def main():
     # ===== Rodape =====
     st.divider()
     st.caption(
-        "📊 Pianetto Transportes - Contas a Receber  |  "
+        "📊 Pianetto Transportes - Contas a Receber + Fluxo de Caixa  |  "
         "Dados consolidados das 11 filiais (CNPJ raiz 43.976.512)  |  "
+        "Saldo a Pagar: titulos em aberto (id_tipo=2, dt_quitacao IS NULL)  |  "
         f"Atualizado em {hoje.strftime('%d/%m/%Y')}"
     )
 
