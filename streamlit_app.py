@@ -338,7 +338,7 @@ def main():
             hovertemplate="Acumulado: R$ %{y:,.2f}<extra></extra>",
         )
         fig.add_hline(y=0, line_width=1, line_color="#666")
-        fig.add_vline(x=hoje, line_dash="dash", line_color="#FFC000",
+        fig.add_vline(x=hoje.isoformat(), line_dash="dash", line_color="#FFC000",
                       annotation_text="Hoje", annotation_position="top right")
         fig.update_layout(
             barmode="relative", height=520,
@@ -423,7 +423,7 @@ def main():
             legend=dict(orientation="h", yanchor="bottom", y=1.02, x=1, xanchor="right"),
         )
         # destaque hoje
-        fig.add_vline(x=hoje, line_dash="dash", line_color="#FFC000",
+        fig.add_vline(x=hoje.isoformat(), line_dash="dash", line_color="#FFC000",
                       annotation_text="Hoje", annotation_position="top right")
         st.plotly_chart(fig, use_container_width=True)
 
@@ -622,3 +622,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
