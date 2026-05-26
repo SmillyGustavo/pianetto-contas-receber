@@ -338,8 +338,13 @@ def main():
             hovertemplate="Acumulado: R$ %{y:,.2f}<extra></extra>",
         )
         fig.add_hline(y=0, line_width=1, line_color="#666")
-        fig.add_vline(x=hoje.isoformat(), line_dash="dash", line_color="#FFC000",
-                      annotation_text="Hoje", annotation_position="top right")
+        fig.add_vline(x=hoje.isoformat(), line_dash="dash", line_color="#FFC000")
+        fig.add_annotation(
+            x=hoje.isoformat(), y=1.02, yref="paper",
+            text="Hoje", showarrow=False, xanchor="left",
+            font=dict(color="#FFC000", size=12),
+            bgcolor="rgba(255,255,255,0.7)",
+        )
         fig.update_layout(
             barmode="relative", height=520,
             title="Fluxo de caixa diario (Receber positivo · Pagar negativo)",
@@ -423,8 +428,13 @@ def main():
             legend=dict(orientation="h", yanchor="bottom", y=1.02, x=1, xanchor="right"),
         )
         # destaque hoje
-        fig.add_vline(x=hoje.isoformat(), line_dash="dash", line_color="#FFC000",
-                      annotation_text="Hoje", annotation_position="top right")
+        fig.add_vline(x=hoje.isoformat(), line_dash="dash", line_color="#FFC000")
+        fig.add_annotation(
+            x=hoje.isoformat(), y=1.02, yref="paper",
+            text="Hoje", showarrow=False, xanchor="left",
+            font=dict(color="#FFC000", size=12),
+            bgcolor="rgba(255,255,255,0.7)",
+        )
         st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("##### Tabela por dia")
@@ -623,3 +633,4 @@ def main():
 if __name__ == "__main__":
     main()
 
+fix: separa add_vline e add_annotation
