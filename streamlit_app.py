@@ -632,5 +632,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-fix: separa add_vline e add_annotation
